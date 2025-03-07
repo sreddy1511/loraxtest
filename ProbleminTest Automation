@@ -1,0 +1,108 @@
+1. Lack of Assertions (KISS, Single Responsibility)
+Problem: Several tests lack assertions, undermining their purpose:
+BatchMessages: Iterates over SendMessages results but doesn’t verify outcomes (e.g., success, count).
+ConstructorAndCreateTests: Only asserts NullReferenceException but doesn’t validate successful creation or exception handling outcomes.
+DeleteLoraxOpsQueue: No assertions for deletion success or failure.
+SendMessageBatchAsyncUnitTest: No checks on the send operation’s result.
+Impact: Tests pass without verifying behavior, violating KISS (tests should be simple and clear in intent) and Single Responsibility (tests should verify one thing).
+Fix: Add assertions to confirm expected outcomes:
+
+[Fact]
+public async Task BatchMessages_SendsMessagesSuccessfully()
+{
+    // ... existing setup ...
+    var results = new List<SendMessageBatchResultEntry>();
+    await foreach (var result in LoraxSQS.SendMessages(Messages))
+    {
+        results.Add(result);
+    }
+    Assert.Equal(10, results.Count); // Verify all messages processed
+}
+
+2. Unverified Mock Interactions (DRY, Single Responsibility)
+Problem: Mock setups (e.g., SQSClient.CreateQueueAsync, DeleteQueueAsync) are defined, but tests don’t use Verify to ensure these methods were called.
+Example: SendMessageBatchAsyncUnitTest sets up SendMessageBatchAsync but doesn’t confirm the call.
+Impact: Violates DRY (mock setup is repeated without reuse) and Single Responsibility (tests should verify interaction).
+Fix: Use SQSClient.Verify:
+SQSClient.Verify(c => c.SendMessageBatchAsync(It.IsAny<SendMessageBatchRequest>(), default), Times.Once());
+
+3. Incomplete Exception Testing (KISS, Open/Closed)
+Problem: Exception scenarios are partially tested:
+ConstructorAndCreateTests checks NullReferenceException but not QueueDeletedRecentlyException or QueueNameExistsException handling.
+DeleteLoraxOpsQueue doesn’t test QueueDoesNotExistException.
+Impact: Violates KISS (tests should be simple yet complete) and Open/Closed (should be extensible for new exception cases).
+Fix: Add explicit exception tests:
+[Fact]
+public async Task CreateSQSQueue_QueueDeletedRecently_HandlesException()
+{
+    LoraxSQS = new LoraxSQS(new ServiceConfig(ServiceConfigType.Ops), SQSClient.Object, new SqsConfiguration { QueueName = QueueDeletedRecentlyExceptionName }, null);
+    await Assert.ThrowsAsync<QueueDeletedRecentlyException>(async () => await LoraxSQS.CreateSQSQueue());
+}
+4. Hardcoded Queue URLs (DRY, Dependency Inversion)
+Problem: DeleteQueueURL and DeleteQueueDoesNotExistURL are hardcoded with Constants.AWSAccountNumber.
+Impact: Violates DRY (repetitive URL construction) and Dependency Inversion (tight coupling to a constant).
+Fix: Abstract URL generation:
+private string GetQueueUrl(string queueName) => $"https://sqs.amazonaws.com/{Config.AccountNumber}/{queueName}";
+DeleteQueueURL = GetQueueUrl(DeleteQueueName);
+
+5. Redundant Mock Setups (DRY, KISS)
+Problem:
+SQSClient.Setup(C => C.DeleteQueueAsync(It.IsAny<string>(), It.IsAny<CancellationToken>())) overlaps with specific setups for DeleteQueueAsync.
+Constants like BatchRequestTooLongExceptionName and TooManyEntriesInBatchRequestExceptionName are unused.
+Impact: Violates DRY (unnecessary duplication) and KISS (clutters code).
+Fix: Remove redundant setups and unused constants unless tested:
+// Remove this if not needed elsewhere
+SQSClient.Setup(C => C.DeleteQueueAsync(It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(...);
+
+6. Logger Verification Missing (Single Responsibility)
+Problem: Logger is set up with Verifiable() but not verified in tests expecting errors (e.g., exceptions in CreateSQSQueue).
+Impact: Violates Single Responsibility (logging behavior isn’t tested).
+Fix: Verify logging:
+Logger.Verify(l => l.LogError(It.IsAny<QueueDeletedRecentlyException>()), Times.Once());
+
+7. Test Naming and Granularity (KISS, Single Responsibility)
+Problem: ConstructorAndCreateTests combines multiple concerns (constructor and queue creation).
+Impact: Violates KISS (tests should be simple) and Single Responsibility (one test per behavior).
+Fix: Split into separate tests:
+[Fact]
+public void Constructor_WithNullQueueName_ThrowsNullReference()
+{
+    Assert.Throws<NullReferenceException>(() => new LoraxSQS(new ServiceConfig(ServiceConfigType.Ops), SQSClient.Object, new SqsConfiguration(), null));
+}
+
+[Fact]
+public async Task CreateSQSQueue_WithValidName_Succeeds()
+{
+    LoraxSQS = new LoraxSQS(new ServiceConfig(ServiceConfigType.Ops), SQSClient.Object, new SqsConfiguration { QueueName = CreateQueueName }, null);
+    await LoraxSQS.CreateSQSQueue();
+    SQSClient.Verify(c => c.CreateQueueAsync(It.IsAny<CreateQueueRequest>(), default), Times.Once());
+}
+
+Revised Example (SendMessageBatchAsyncUnitTest)
+Here’s a refactored version of SendMessageBatchAsyncUnitTest applying these principles:
+[Fact]
+public async Task SendMessageBatchAsync_WithValidMessage_SendsSuccessfully()
+{
+    // Arrange
+    SQSClient.Setup(c => c.SendMessageBatchAsync(It.IsAny<SendMessageBatchRequest>(), default))
+        .ReturnsAsync(new SendMessageBatchResponse { HttpStatusCode = System.Net.HttpStatusCode.OK });
+    LoraxSQS = new LoraxSQS(Config, SQSClient.Object, new SqsConfiguration { QueueName = SendMessageBatchRequestName }, Logger.Object);
+    var message = new SendMessage("ID", "Message");
+
+    // Act
+    await LoraxSQS.SendMessage(message);
+
+    // Assert
+    SQSClient.Verify(c => c.SendMessageBatchAsync(It.Is<SendMessageBatchRequest>(r => r.Entries.Count == 1), default), Times.Once());
+    Logger.Verify(l => l.LogError(It.IsAny<Exception>()), Times.Never());
+}
+
+Summary of Issues
+Missing Assertions: Tests don’t verify outcomes 
+Unverified Mocks: Mock interactions aren’t confirmed 
+Incomplete Exception Testing: Gaps in error handling 
+Hardcoded URLs: Reduces flexibility 
+Redundant Setups: Clutters code 
+Logger Verification: Logging behavior untested 
+Test Structure: Combines concerns 
+Null Safety: Unverified null handling 
